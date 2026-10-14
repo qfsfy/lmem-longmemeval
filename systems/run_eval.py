@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--abstain-score", type=float, default=None)
     ap.add_argument("--cos-min", type=float, default=0.0, help="v2 稠密通道拒答阈值")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--workers", type=int, default=3, help="答题并发线程（限流严格的后端用 2）")
     args = ap.parse_args(argv)
 
     load_env()
@@ -44,33 +45,34 @@ def main(argv: list[str] | None = None) -> None:
 
     model_cfg = {"deepseek": deepseek_config, "local": local_config,
                  "zhipu": zhipu_config}[args.backend]()
+    common = {"workers": args.workers}
     if args.system == "v1":
         from systems.v1_lexical import run as run_v1
         kw = {} if args.abstain_score is None else {"abstain_score": args.abstain_score}
-        run_v1(questions, out, tag=tag, model_cfg=model_cfg, **kw)
+        run_v1(questions, out, tag=tag, model_cfg=model_cfg, **kw, **common)
     elif args.system == "v2":
         from systems.v2_dense import run as run_v2
         gate = (0.0, 0.0) if args.abstain_score is None else (args.abstain_score, args.cos_min)
-        run_v2(questions, out, tag=tag, model_cfg=model_cfg, abstain=gate)
+        run_v2(questions, out, tag=tag, model_cfg=model_cfg, abstain=gate, **common)
     elif args.system == "v3":
         from systems.v3_layered import run as run_v3
-        run_v3(questions, out, tag=tag, model_cfg=model_cfg)
+        run_v3(questions, out, tag=tag, model_cfg=model_cfg, **common)
     elif args.system == "v4":
         from systems.v4_route import run as run_v4
         if args.backend == "zhipu":
             run_v4(questions, out, tag=tag, model_cfg=model_cfg,
-                   reasoner_cfg=zhipu_flagship_config())
+                   reasoner_cfg=zhipu_flagship_config(), **common)
         else:
             run_v4(questions, out, tag=tag, model_cfg=model_cfg,
-                   use_reasoner=(args.backend == "deepseek"))
+                   use_reasoner=(args.backend == "deepseek"), **common)
     elif args.system == "v5":
         from systems.v5_fusion import run as run_v5
         if args.backend == "zhipu":
             run_v5(questions, out, tag=tag, model_cfg=model_cfg,
-                   reasoner_cfg=zhipu_flagship_config())
+                   reasoner_cfg=zhipu_flagship_config(), **common)
         else:
             run_v5(questions, out, tag=tag, model_cfg=model_cfg,
-                   use_reasoner=(args.backend == "deepseek"))
+                   use_reasoner=(args.backend == "deepseek"), **common)
 
 
 if __name__ == "__main__":

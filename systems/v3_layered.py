@@ -385,9 +385,12 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v3",
     def build_group(g):
         store = MemoryStore(":memory:")
         atoms = AtomStore(store)
+        # 抽取禁用思考：速度快 2-3 倍，且避免思考吞掉 token 预算截断 JSON 输出
+        import dataclasses
+        extract_fast = dataclasses.replace(extract_cfg, thinking=False)
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            extracted = list(ex.map(lambda s: extract_atoms(backend, extract_cfg, s),
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            extracted = list(ex.map(lambda s: extract_atoms(backend, extract_fast, s),
                                     g["sessions"]))
         for s, atom_dicts in zip(g["sessions"], extracted):
             atoms.apply_atoms(s, atom_dicts)

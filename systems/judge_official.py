@@ -124,9 +124,15 @@ def judge_file(hyp_path: str | Path, ref_path: str | Path, out_path: str | Path 
             for attempt in range(5):
                 try:
                     r = client.chat.completions.create(
-                        model=model, temperature=0, max_tokens=10,
+                        model=model, temperature=0, max_tokens=512,
+                        # GLM 系默认带思考：官方协议只收 yes/no，必须关掉思考
+                        extra_body={"thinking": {"type": "disabled"}},
                         messages=[{"role": "user", "content": prompt}])
-                    label = "yes" in (r.choices[0].message.content or "").strip().lower()
+                    msg = r.choices[0].message
+                    text = (getattr(msg, "content", None) or "")
+                    if not text:
+                        text = getattr(msg, "reasoning_content", "") or ""
+                    label = "yes" in text.strip().lower()
                     break
                 except Exception as e:
                     wait = 2 ** attempt

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Type
@@ -64,6 +65,25 @@ class OpenAICompatBackend(BaseBackend):
         return self._clients[key]
 
     @staticmethod
+    def _create_with_retry(client: Any, kwargs: dict) -> Any:
+        """429/5xx/连接错误退避重试（coding plan 等严格限流端点必需）。"""
+        last_exc: Optional[Exception] = None
+        for attempt in range(8):
+            try:
+                return client.chat.completions.create(**kwargs)
+            except Exception as e:  # noqa: BLE001 - 按异常类名分流
+                name = type(e).__name__
+                if not any(s in name for s in ("RateLimit", "APIError", "APIConnection",
+                                               "InternalServerError", "Timeout")):
+                    raise
+                last_exc = e
+                wait = min(60.0, (2 ** attempt) * 2.5)
+                print(f"[llm] {name}, backoff {wait:.0f}s (attempt {attempt + 1})",
+                      file=sys.stderr, flush=True)
+                time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
+    @staticmethod
     def _extra_body(model_cfg: ModelConfig) -> dict:
         body = dict(model_cfg.extra_body)
         if model_cfg.thinking is not None:
@@ -93,7 +113,7 @@ class OpenAICompatBackend(BaseBackend):
             kwargs["response_format"] = {"type": "json_object"}
 
         t0 = time.time()
-        resp = client.chat.completions.create(**kwargs)
+        resp = self._create_with_retry(client, kwargs)
         text = resp.choices[0].message.content or ""
         usage = {}
         if getattr(resp, "usage", None):
@@ -110,7 +130,7 @@ class OpenAICompatBackend(BaseBackend):
                     f"{user}\n\n你上一次的输出无法按 Schema 解析，请严格重新输出 JSON：\n{text[:2000]}"
                 )
                 kwargs["messages"] = messages + [{"role": "user", "content": retry_user}]
-                resp = client.chat.completions.create(**kwargs)
+                resp = self._create_with_retry(client, kwargs)
                 text = resp.choices[0].message.content or ""
                 data = _try_parse(schema, text)
         return Completion(
