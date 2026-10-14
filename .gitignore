@@ -17,3 +17,5 @@ data/longmemeval/*.jsonl
 
 # 密钥
 .env
+reference/
+runs/
