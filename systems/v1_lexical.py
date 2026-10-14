@@ -294,10 +294,14 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v1",
             stats = [ingest_rules(store, s) for s in g["sessions"]]
             n_cards = sum(s["cards_added"] for s in stats)
             for q in g["questions"]:
-                ans, meta = answer_question(
-                    store, backend, model_cfg, q["question"],
-                    as_of=q.get("question_date"), abstain_score=abstain_score,
-                )
+                try:
+                    ans, meta = answer_question(
+                        store, backend, model_cfg, q["question"],
+                        as_of=q.get("question_date"), abstain_score=abstain_score,
+                    )
+                except Exception as e:  # 单题故障不拖垮整轮（记录后按拒答输出）
+                    ans = "I don't have that information in my memory."
+                    meta = {"qtype": "error", "error": str(e)[:200]}
                 f.write(json.dumps({"question_id": q["question_id"], "hypothesis": ans},
                                    ensure_ascii=False) + "\n")
                 u = meta.pop("usage", {}) or {}
@@ -334,6 +338,22 @@ def deepseek_config() -> ModelConfig:
         api_key_env="DEEPSEEK_API_KEY",
         temperature=0.0,
         max_tokens=120,
+    )
+
+
+def local_config() -> ModelConfig:
+    """本地 llama.cpp server（OpenAI 兼容），零 API 成本的统一评测后端。
+
+    启动：.tools/llama.cpp/llama-server.exe -m .models/qwen3-4b-instruct-2507-q4km.gguf \
+        -ngl 99 -c 8192 --host 127.0.0.1 --port 8321
+    """
+    import os
+    return ModelConfig(
+        name=os.environ.get("LOCAL_MODEL", "qwen3-4b-instruct-2507"),
+        base_url=os.environ.get("LOCAL_BASE_URL", "http://127.0.0.1:8321/v1"),
+        api_key_env="LOCAL_API_KEY",  # 未设置时客户端回退 "EMPTY"
+        temperature=0.0,
+        max_tokens=200,
     )
 
 

@@ -20,3 +20,6 @@ data/longmemeval/*.jsonl
 reference/
 runs/
 .models/
+.tools/
+*.zip
+*.gguf

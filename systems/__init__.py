@@ -4,6 +4,7 @@
 使 `python -m systems.<mod>` 无需安装即可运行（规避中文路径下 pip -e 的构建问题）。
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,3 +12,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(_ROOT / "src"), str(_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# 本机常驻系统代理（如 Clash）会劫持 httpx 对 localhost 的请求（502）。
+# 本地 llama-server 走回环地址，必须直连。
+os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
+os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
