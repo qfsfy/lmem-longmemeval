@@ -9,14 +9,31 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _LATIN_RE = re.compile(r"[A-Za-z0-9]+")
 _DATE_RE = re.compile(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})")
 
+# 轻量英文后缀归一（保守策略：只处理长词，避免 was->wa 这类过度词干化）。
+# BM25 的 IDF 负责区分度，这里只弥合复数/时态造成的词面 gap（dogs vs dog, moved vs move）。
+_EN_SUFFIXES = ("ing", "ed", "es", "s")
 
-def tokenize(text: str) -> list[str]:
-    """中英混合分词：拉丁词元 + 中文二字组 + 中文单字。
+
+def _stem_en(word: str) -> str:
+    if len(word) <= 4:
+        return word
+    for suf in _EN_SUFFIXES:
+        if word.endswith(suf) and len(word) - len(suf) >= 4:
+            if suf == "s" and word.endswith("ss"):
+                continue
+            return word[: -len(suf)]
+    return word
+
+
+def tokenize(text: str, stem: bool = True) -> list[str]:
+    """中英混合分词：拉丁词元（可选手工词干化）+ 中文二字组 + 中文单字。
 
     单字粒度保证跨表述的召回（问题"住在" vs 陈述"居住地"），
     区分度主要由 BM25 的 IDF 承担。
     """
     tokens = [w.lower() for w in _LATIN_RE.findall(text)]
+    if stem:
+        tokens = [_stem_en(w) for w in tokens]
     cjk = _CJK_RE.findall(text)
     tokens.extend(a + b for a, b in zip(cjk, cjk[1:]))
     tokens.extend(cjk)
