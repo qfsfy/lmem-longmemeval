@@ -6,14 +6,16 @@ import argparse
 import json
 from pathlib import Path
 
-from systems.v1_lexical import deepseek_config, load_env, local_config, run, stratified_subset
+from systems.v1_lexical import deepseek_config, load_env, local_config, run, \
+    stratified_subset, zhipu_config, zhipu_flagship_config
 
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="LongMemEval Oracle 评测驱动")
     ap.add_argument("--system", default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
-    ap.add_argument("--backend", default="deepseek", choices=["deepseek", "local"],
-                    help="local=llama.cpp Qwen3-4B（零成本统一口径）")
+    ap.add_argument("--backend", default="deepseek",
+                    choices=["deepseek", "local", "zhipu"],
+                    help="zhipu=智谱 coding plan（glm-5.3-flash 答题/判分, glm-5.3 路由）")
     ap.add_argument("--data", default="data/longmemeval/longmemeval_oracle.json")
     ap.add_argument("--out", default="")
     ap.add_argument("--subset", type=int, default=0, help="分层抽样题数，0=全量500")
@@ -33,12 +35,15 @@ def main(argv: list[str] | None = None) -> None:
     tag_parts = [args.system, "sub%d" % args.subset if args.subset else "full"]
     if args.backend == "local":
         tag_parts.append("loc")
+    elif args.backend == "zhipu":
+        tag_parts.append("zh")
     if args.seed != 42:
         tag_parts.append("seed%d" % args.seed)
     tag = "_".join(tag_parts)
     out = args.out or f"runs/{args.system}"
 
-    model_cfg = deepseek_config() if args.backend == "deepseek" else local_config()
+    model_cfg = {"deepseek": deepseek_config, "local": local_config,
+                 "zhipu": zhipu_config}[args.backend]()
     if args.system == "v1":
         from systems.v1_lexical import run as run_v1
         kw = {} if args.abstain_score is None else {"abstain_score": args.abstain_score}
@@ -52,12 +57,20 @@ def main(argv: list[str] | None = None) -> None:
         run_v3(questions, out, tag=tag, model_cfg=model_cfg)
     elif args.system == "v4":
         from systems.v4_route import run as run_v4
-        run_v4(questions, out, tag=tag, model_cfg=model_cfg,
-               use_reasoner=(args.backend == "deepseek"))
+        if args.backend == "zhipu":
+            run_v4(questions, out, tag=tag, model_cfg=model_cfg,
+                   reasoner_cfg=zhipu_flagship_config())
+        else:
+            run_v4(questions, out, tag=tag, model_cfg=model_cfg,
+                   use_reasoner=(args.backend == "deepseek"))
     elif args.system == "v5":
         from systems.v5_fusion import run as run_v5
-        run_v5(questions, out, tag=tag, model_cfg=model_cfg,
-               use_reasoner=(args.backend == "deepseek"))
+        if args.backend == "zhipu":
+            run_v5(questions, out, tag=tag, model_cfg=model_cfg,
+                   reasoner_cfg=zhipu_flagship_config())
+        else:
+            run_v5(questions, out, tag=tag, model_cfg=model_cfg,
+                   use_reasoner=(args.backend == "deepseek"))
 
 
 if __name__ == "__main__":

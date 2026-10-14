@@ -370,7 +370,8 @@ def answer_question(store: MemoryStore, index: DenseIndex, backend: OpenAICompat
 
 def run(questions: list[dict], out_dir: str | Path, tag: str = "v3",
         model_cfg: ModelConfig | None = None, extract_cfg: ModelConfig | None = None,
-        limit: int | None = None) -> dict:
+        limit: int | None = None, workers: int = 3) -> dict:
+    from systems.runner import run_pipeline
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     model_cfg = model_cfg or deepseek_config()
@@ -381,43 +382,33 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v3",
         questions = questions[:limit]
     groups = group_by_haystack(questions)
 
-    hyp_path = out_dir / f"hyp_{tag}.jsonl"
-    records: list[dict] = []
-    usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
-    t0 = time.time()
-    with hyp_path.open("w", encoding="utf-8") as f:
-        for gi, g in enumerate(groups, 1):
-            store = MemoryStore(":memory:")
-            atoms = AtomStore(store)
-            # 组内多会话并行抽取（纯函数），按原时序应用（保证冲突失效语义）
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                extracted = list(ex.map(lambda s: extract_atoms(backend, extract_cfg, s),
-                                        g["sessions"]))
-            for s, atom_dicts in zip(g["sessions"], extracted):
-                atoms.apply_atoms(s, atom_dicts)
-            index = DenseIndex()
-            index.add(store.all_cards())
-            for q in g["questions"]:
-                ans, meta = answer_question(store, index, backend, model_cfg,
-                                            q["question"], q.get("question_date"))
-                f.write(json.dumps({"question_id": q["question_id"], "hypothesis": ans},
-                                   ensure_ascii=False) + "\n")
-                u = meta.pop("usage", {}) or {}
-                usage_total["prompt_tokens"] += u.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += u.get("completion_tokens", 0)
-                records.append({"question_id": q["question_id"],
-                                "question_type": q.get("question_type"),
-                                "is_abs": q["question_id"].endswith("_abs"),
-                                "answer": q.get("answer", ""), "hypothesis": ans, **meta})
-            if gi % 25 == 0 or gi == len(groups):
-                n_atoms = len(store.all_cards())
-                print(f"[{tag}] 组 {gi}/{len(groups)} 原子+笔记={n_atoms} "
-                      f"已答={len(records)} 用时={time.time()-t0:.0f}s", flush=True)
-            store.close()
+    def build_group(g):
+        store = MemoryStore(":memory:")
+        atoms = AtomStore(store)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            extracted = list(ex.map(lambda s: extract_atoms(backend, extract_cfg, s),
+                                    g["sessions"]))
+        for s, atom_dicts in zip(g["sessions"], extracted):
+            atoms.apply_atoms(s, atom_dicts)
+        index = DenseIndex()
+        index.add(store.all_cards())
+        return store, index
 
-    (out_dir / f"records_{tag}.json").write_text(
-        json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    def answer_one(ctx, q):
+        store, index = ctx
+        try:
+            ans, meta = answer_question(store, index, backend, model_cfg,
+                                        q["question"], q.get("question_date"))
+        except Exception as e:
+            ans = "I don't have that information in my memory."
+            meta = {"qtype": "error", "error": str(e)[:200]}
+        return ans, meta
+
+    t0 = time.time()
+    records, usage_total = run_pipeline(
+        groups, build_group, answer_one, out_dir, tag, workers=workers)
+
     summary = {"tag": tag, "n_questions": len(records),
                "elapsed_s": round(time.time() - t0, 1), "usage": usage_total,
                "qtype_dist": dict(Counter(r["question_type"] for r in records))}

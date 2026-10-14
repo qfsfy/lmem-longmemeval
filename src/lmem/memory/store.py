@@ -75,7 +75,9 @@ class MemoryStore:
     def __init__(self, path: str | Path = ":memory:") -> None:
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path))
+        # check_same_thread=False：并行评测时建库在主线程、答题在工作线程，
+        # 单个 store 永远不会被两个线程同时使用
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.executescript(_DDL)
         self._index = _BM25()
         self._dirty = True

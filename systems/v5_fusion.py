@@ -87,54 +87,51 @@ def answer_v5(store: MemoryStore, index, backend: OpenAICompatBackend, chat_cfg:
 
 def run(questions: list[dict], out_dir: str | Path, tag: str = "v5",
         model_cfg: ModelConfig | None = None, use_reasoner: bool = True,
-        limit: int | None = None) -> dict:
+        reasoner_cfg: ModelConfig | None = None,
+        limit: int | None = None, workers: int = 3) -> dict:
+    from systems.runner import run_pipeline
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     chat_cfg = model_cfg or deepseek_config()
-    reasoner_cfg = make_reasoner_cfg(chat_cfg) if use_reasoner else None
+    if not use_reasoner:
+        reasoner_cfg = None
+    elif reasoner_cfg is None:
+        reasoner_cfg = make_reasoner_cfg(chat_cfg)
     backend = OpenAICompatBackend()
 
     if limit:
         questions = questions[:limit]
     groups = group_by_haystack(questions)
 
-    hyp_path = out_dir / f"hyp_{tag}.jsonl"
-    records: list[dict] = []
-    usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
-    t0 = time.time()
-    with hyp_path.open("w", encoding="utf-8") as f:
-        for gi, g in enumerate(groups, 1):
-            store = MemoryStore(":memory:")
-            atoms = AtomStore(store)
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                extracted = list(ex.map(lambda s: extract_atoms(backend, chat_cfg, s),
-                                        g["sessions"]))
-            for s, atom_dicts in zip(g["sessions"], extracted):
-                atoms.apply_atoms(s, atom_dicts)
-            from systems.v2_dense import DenseIndex
-            index = DenseIndex()
-            index.add(store.all_cards())
-            for q in g["questions"]:
-                ans, meta = answer_v5(store, index, backend, chat_cfg, reasoner_cfg,
-                                      q["question"], q.get("question_date"))
-                f.write(json.dumps({"question_id": q["question_id"], "hypothesis": ans},
-                                   ensure_ascii=False) + "\n")
-                u = meta.pop("usage", {}) or {}
-                usage_total["prompt_tokens"] += u.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += u.get("completion_tokens", 0)
-                records.append({"question_id": q["question_id"],
-                                "question_type": q.get("question_type"),
-                                "is_abs": q["question_id"].endswith("_abs"),
-                                "answer": q.get("answer", ""), "hypothesis": ans, **meta})
-            if gi % 25 == 0 or gi == len(groups):
-                print(f"[{tag}] 组 {gi}/{len(groups)} 已答={len(records)} "
-                      f"用时={time.time()-t0:.0f}s", flush=True)
-            store.close()
+    def build_group(g):
+        store = MemoryStore(":memory:")
+        atoms = AtomStore(store)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            extracted = list(ex.map(lambda s: extract_atoms(backend, chat_cfg, s),
+                                    g["sessions"]))
+        for s, atom_dicts in zip(g["sessions"], extracted):
+            atoms.apply_atoms(s, atom_dicts)
+        from systems.v2_dense import DenseIndex
+        index = DenseIndex()
+        index.add(store.all_cards())
+        return store, index
 
-    (out_dir / f"records_{tag}.json").write_text(
-        json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    def answer_one(ctx, q):
+        store, index = ctx
+        try:
+            ans, meta = answer_v5(store, index, backend, chat_cfg, reasoner_cfg,
+                                  q["question"], q.get("question_date"))
+        except Exception as e:
+            ans = "I don't have that information in my memory."
+            meta = {"qtype": "error", "error": str(e)[:200]}
+        return ans, meta
+
+    t0 = time.time()
+    records, usage_total = run_pipeline(
+        groups, build_group, answer_one, out_dir, tag, workers=workers)
     n_recovered = sum(1 for r in records if r.get("recovered"))
+
     summary = {"tag": tag, "n_questions": len(records),
                "recovered_from_abstain": n_recovered,
                "elapsed_s": round(time.time() - t0, 1), "usage": usage_total,

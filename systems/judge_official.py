@@ -83,12 +83,25 @@ def judge_file(hyp_path: str | Path, ref_path: str | Path, out_path: str | Path 
                base_url: str | None = None, api_key: str | None = None,
                model: str | None = None) -> dict:
     import os
-    base_url = base_url or os.environ.get("JUDGE_BASE_URL",
-                                          os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"))
-    api_key = api_key or os.environ.get("JUDGE_API_KEY",
-                                        os.environ.get("DEEPSEEK_API_KEY", ""))
-    model = model or os.environ.get("JUDGE_MODEL",
-                                    os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+    # 默认判分端点优先级：显式 JUDGE_* > 智谱 coding plan > DeepSeek
+    if os.environ.get("JUDGE_BASE_URL"):
+        base_url = os.environ["JUDGE_BASE_URL"]
+    elif os.environ.get("ZAI_CODING_KEY"):
+        base_url = os.environ.get("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4")
+    else:
+        base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+    if os.environ.get("JUDGE_API_KEY"):
+        api_key = os.environ["JUDGE_API_KEY"]
+    elif os.environ.get("ZAI_CODING_KEY"):
+        api_key = os.environ["ZAI_CODING_KEY"]
+    else:
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if os.environ.get("JUDGE_MODEL"):
+        model = os.environ["JUDGE_MODEL"]
+    elif os.environ.get("ZAI_CODING_KEY"):
+        model = os.environ.get("ZHIPU_MODEL", "glm-5.3-flash")
+    else:
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=120)
 
     hyps = [json.loads(l) for l in Path(hyp_path).read_text(encoding="utf-8").splitlines() if l.strip()]

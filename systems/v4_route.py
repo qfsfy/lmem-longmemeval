@@ -83,11 +83,16 @@ def answer_with_recovery(store: MemoryStore, backend: OpenAICompatBackend,
 
 def run(questions: list[dict], out_dir: str | Path, tag: str = "v4",
         model_cfg: ModelConfig | None = None, use_reasoner: bool = True,
-        limit: int | None = None) -> dict:
+        reasoner_cfg: ModelConfig | None = None,
+        limit: int | None = None, workers: int = 3) -> dict:
+    from systems.runner import run_pipeline
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     chat_cfg = model_cfg or deepseek_config()
-    reasoner_cfg = make_reasoner_cfg(chat_cfg) if use_reasoner else None
+    if not use_reasoner:
+        reasoner_cfg = None
+    elif reasoner_cfg is None:
+        reasoner_cfg = make_reasoner_cfg(chat_cfg)
     backend = OpenAICompatBackend()
 
     if limit:

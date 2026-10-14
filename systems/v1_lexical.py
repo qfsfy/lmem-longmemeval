@@ -272,7 +272,8 @@ def answer_question(store: MemoryStore, backend: BaseBackend, model_cfg: ModelCo
 
 def run(questions: list[dict], out_dir: str | Path, tag: str = "v1",
         model_cfg: ModelConfig | None = None, abstain_score: float = 0.0,
-        limit: int | None = None) -> dict:
+        limit: int | None = None, workers: int = 3) -> dict:
+    from systems.runner import run_pipeline
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     model_cfg = model_cfg or deepseek_config()
@@ -282,42 +283,27 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v1",
         questions = questions[:limit]
     groups = group_by_haystack(questions)
 
-    hyp_path = out_dir / f"hyp_{tag}.jsonl"
-    rec_path = out_dir / f"records_{tag}.json"
-    records: list[dict] = []
-    usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
+    def build_group(g):
+        store = MemoryStore(":memory:")
+        for s in g["sessions"]:
+            ingest_rules(store, s)
+        return store
+
+    def answer_one(store, q):
+        try:
+            ans, meta = answer_question(
+                store, backend, model_cfg, q["question"],
+                as_of=q.get("question_date"), abstain_score=abstain_score,
+            )
+        except Exception as e:  # 单题故障不拖垮整轮（记录后按拒答输出）
+            ans = "I don't have that information in my memory."
+            meta = {"qtype": "error", "error": str(e)[:200]}
+        return ans, meta
+
     t_start = time.time()
+    records, usage_total = run_pipeline(
+        groups, build_group, answer_one, out_dir, tag, workers=workers)
 
-    with hyp_path.open("w", encoding="utf-8") as f:
-        for gi, g in enumerate(groups, 1):
-            store = MemoryStore(":memory:")
-            stats = [ingest_rules(store, s) for s in g["sessions"]]
-            n_cards = sum(s["cards_added"] for s in stats)
-            for q in g["questions"]:
-                try:
-                    ans, meta = answer_question(
-                        store, backend, model_cfg, q["question"],
-                        as_of=q.get("question_date"), abstain_score=abstain_score,
-                    )
-                except Exception as e:  # 单题故障不拖垮整轮（记录后按拒答输出）
-                    ans = "I don't have that information in my memory."
-                    meta = {"qtype": "error", "error": str(e)[:200]}
-                f.write(json.dumps({"question_id": q["question_id"], "hypothesis": ans},
-                                   ensure_ascii=False) + "\n")
-                u = meta.pop("usage", {}) or {}
-                usage_total["prompt_tokens"] += u.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += u.get("completion_tokens", 0)
-                records.append({
-                    "question_id": q["question_id"], "question_type": q.get("question_type"),
-                    "is_abs": q["question_id"].endswith("_abs"),
-                    "answer": q.get("answer", ""), "hypothesis": ans, **meta,
-                })
-            if gi % 20 == 0 or gi == len(groups):
-                print(f"[{tag}] 组 {gi}/{len(groups)} 卡片累计示例={n_cards} "
-                      f"已答={len(records)} 用时={time.time()-t_start:.0f}s", flush=True)
-            store.close()
-
-    rec_path.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
     summary = {
         "tag": tag, "n_questions": len(records),
         "elapsed_s": round(time.time() - t_start, 1),
@@ -344,8 +330,7 @@ def deepseek_config() -> ModelConfig:
 def local_config() -> ModelConfig:
     """本地 llama.cpp server（OpenAI 兼容），零 API 成本的统一评测后端。
 
-    启动：.tools/llama.cpp/llama-server.exe -m .models/qwen3-4b-instruct-2507-q4km.gguf \
-        -ngl 99 -c 8192 --host 127.0.0.1 --port 8321
+    启动：scripts/start_local_server.bat（24k 上下文 + FA + q8_0 KV）
     """
     import os
     return ModelConfig(
@@ -354,6 +339,33 @@ def local_config() -> ModelConfig:
         api_key_env="LOCAL_API_KEY",  # 未设置时客户端回退 "EMPTY"
         temperature=0.0,
         max_tokens=200,
+    )
+
+
+def zhipu_config() -> ModelConfig:
+    """智谱 GLM Coding Plan（用户授权使用本账号密钥）。
+
+    flash = glm-5.3-flash（写入抽取/查询分析/默认生成/判分主力）；
+    旗舰 = glm-5.3（V4/V5 的难题路由，见 make_flagship_cfg）。
+    """
+    import os
+    return ModelConfig(
+        name=os.environ.get("ZHIPU_MODEL", "glm-5.3-flash"),
+        base_url=os.environ.get("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4"),
+        api_key_env="ZAI_CODING_KEY",
+        temperature=0.0,
+        max_tokens=400,
+    )
+
+
+def zhipu_flagship_config() -> ModelConfig:
+    import os
+    return ModelConfig(
+        name=os.environ.get("ZHIPU_FLAGSHIP_MODEL", "glm-5.3"),
+        base_url=os.environ.get("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4"),
+        api_key_env="ZAI_CODING_KEY",
+        temperature=0.0,
+        max_tokens=3000,
     )
 
 
