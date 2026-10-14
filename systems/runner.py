@@ -35,10 +35,22 @@ def run_pipeline(
     """
     t0 = time.time()
 
-    # 1) 建库（串行；V3 抽取内部已并行）
+    # 1) 建库（串行；V3 抽取内部已并行；单组失败重试 3 次后跳过并标记）
     ctxs = []
     for gi, g in enumerate(groups, 1):
-        ctxs.append(build_group(g))
+        ctx = None
+        for attempt in range(3):
+            try:
+                ctx = build_group(g)
+                break
+            except Exception as e:  # 网络抖动等单组故障不拖垮整轮
+                import time as _t
+                wait = 10.0 * (attempt + 1)
+                with _print_lock:
+                    print(f"[{tag}] 建库失败组 {gi}（{type(e).__name__}），{wait:.0f}s 后重试",
+                          file=sys.stderr, flush=True)
+                _t.sleep(wait)
+        ctxs.append(ctx)
         if gi % 100 == 0:
             with _print_lock:
                 print(f"[{tag}] 建库 {gi}/{len(groups)} 用时={time.time()-t0:.0f}s", flush=True)

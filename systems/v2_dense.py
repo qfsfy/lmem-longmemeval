@@ -104,13 +104,10 @@ def retrieve_hybrid(store: MemoryStore, index: DenseIndex, question: str,
     probe = store.search(question, k=1, date=date)
     bm25_top = probe[0][1] if probe else 0.0
 
-    if info["qtype"] == "multi_session" and len(pool) <= 200:
-        # 聚合题型：小库全量读取，稠密只用于把最相关的排在前面（截断保护由长度上限承担）
-        cards = list(pool)
-        return cards, bm25_top, info, 0.0
-
-    bm25_hits = store.search(question, k=bm25_top_k, date=date)
-    dense_hits = index.search(question, allowed, dense_top_k)
+    # 记忆召回预算：聚合题两路各放宽到 48，仍按相关性排序（不拼塞全库）
+    k = 48 if info["qtype"] == "multi_session" else bm25_top_k
+    bm25_hits = store.search(question, k=k, date=date)
+    dense_hits = index.search(question, allowed, k)
 
     # Reciprocal Rank Fusion
     scores: dict[str, float] = {}
@@ -140,7 +137,8 @@ def answer_question(store: MemoryStore, index: DenseIndex, backend: OpenAICompat
                     abstain: tuple[float, float] = (0.0, 0.0)) -> tuple[str, dict]:
     cards, bm25_top, info, cos_top = retrieve_hybrid(store, index, question, as_of)
     meta = {"qtype": info["qtype"], "top_bm25": round(bm25_top, 2),
-            "top_cos": round(cos_top, 3), "n_evidence": len(cards)}
+            "top_cos": round(cos_top, 3), "n_evidence": len(cards),
+            "evidence_chars": sum(len(c.content) for c in cards)}
     bm25_min, cos_min = abstain
     if not cards or (bm25_top < bm25_min and cos_top < cos_min):
         meta["abstain"] = "score_gate"

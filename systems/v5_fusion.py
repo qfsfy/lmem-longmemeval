@@ -47,6 +47,7 @@ def answer_v5(store: MemoryStore, index, backend: OpenAICompatBackend, chat_cfg:
     keep_atoms = info["qtype"] in ("temporal_reasoning", "knowledge_update")
     cards = _dedupe_atoms(cards, keep_atoms)
     meta["n_evidence"] = len(cards)
+    meta["evidence_chars"] = sum(len(c.content) for c in cards)
 
     model_cfg = reasoner_cfg if (reasoner_cfg and info["qtype"] in REASON_TYPES) else chat_cfg
     lines = [f"[{i}] ({c.valid_from}{'→' + c.valid_to + '(superseded)' if c.valid_to else ''}) {c.content}"

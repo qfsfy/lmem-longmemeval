@@ -190,16 +190,11 @@ def retrieve(store: MemoryStore, question: str, as_of: str | None,
     date = None
     if as_of and not info["include_past"] and info["qtype"] != "knowledge_update":
         date = as_of  # 只看当时仍有效的记忆；追问过去状态或更新类题型放开时间旅行
-    pool = store.all_cards() if date is None else store.active_at(date)
-    allowed = {c.id for c in pool}
-    # 聚合类题型：小库（oracle 干草堆）直接全量读取，保证枚举完整；大库退回 top-k
-    probe = store.search(question, k=1, date=date)
-    top_score = probe[0][1] if probe else 0.0
-    if info["qtype"] == "multi_session" and len(pool) <= 200:
-        scored = [(c, 0.0) for c in pool]
-    else:
-        k = bm25_top_k + 12 if info["qtype"] == "multi_session" else bm25_top_k
-        scored = store.search(question, k=k, date=date)
+    # 记忆召回预算：所有题型一律按检索排序取预算内证据（聚合题放宽到 48），
+    # 绝不拼塞全库或全量历史（手册 F.1；且超长中段输入注意力衰减，见报告 §4）
+    k = 48 if info["qtype"] == "multi_session" else bm25_top_k
+    scored = store.search(question, k=k, date=date)
+    top_score = scored[0][1] if scored else 0.0
     cards = [c for c, _ in scored]
     existing = {c.id for c in cards}
     if date is not None:
@@ -252,7 +247,8 @@ def answer_question(store: MemoryStore, backend: BaseBackend, model_cfg: ModelCo
                     question: str, as_of: str | None,
                     abstain_score: float) -> tuple[str, dict]:
     cards, top_score, info = retrieve(store, question, as_of)
-    meta = {"qtype": info["qtype"], "top_bm25": round(top_score, 2), "n_evidence": len(cards)}
+    meta = {"qtype": info["qtype"], "top_bm25": round(top_score, 2), "n_evidence": len(cards),
+            "evidence_chars": sum(len(c.content) for c in cards)}
     if not cards or top_score < abstain_score:
         meta["abstain"] = "score_gate"
         return "I don't have that information in my memory.", meta

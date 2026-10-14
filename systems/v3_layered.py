@@ -281,12 +281,10 @@ def retrieve_atoms(store: MemoryStore, index: DenseIndex, question: str,
     probe = store.search(question, k=1, date=date)
     bm25_top = probe[0][1] if probe else 0.0
 
-    if info["qtype"] == "multi_session" and len(pool) <= 200:
-        cards = list(pool)
-        return cards, bm25_top, info, 0.0
-
-    bm25_hits = store.search(question, k=bm25_top_k, date=date)
-    dense_hits = index.search(question, allowed, bm25_top_k)
+    # 记忆召回预算：聚合题放宽到 48，仍按混合相关性排序（不拼塞全库/全历史）
+    k = 48 if info["qtype"] == "multi_session" else bm25_top_k
+    bm25_hits = store.search(question, k=k, date=date)
+    dense_hits = index.search(question, allowed, k)
     scores: dict[str, float] = {}
     for rank, (card, _) in enumerate(bm25_hits):
         scores[card.id] = scores.get(card.id, 0.0) + 1.0 / (60 + rank + 1)
@@ -349,6 +347,7 @@ def answer_question(store: MemoryStore, index: DenseIndex, backend: OpenAICompat
     keep_atoms = info["qtype"] in ("temporal_reasoning", "knowledge_update")
     cards = _dedupe_atoms(cards, keep_atoms)
     meta["n_evidence_after_dedupe"] = len(cards)
+    meta["evidence_chars"] = sum(len(c.content) for c in cards)
     lines = []
     for i, c in enumerate(cards, 1):
         span = c.valid_from + ("" if not c.valid_to else "→" + c.valid_to + "(superseded)")
