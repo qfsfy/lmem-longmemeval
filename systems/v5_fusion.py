@@ -106,13 +106,9 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v5",
     def build_group(g):
         store = MemoryStore(":memory:")
         atoms = AtomStore(store)
-        # 抽取禁用思考（同 V3）：提速且防 JSON 截断
-        import dataclasses
-        extract_fast = dataclasses.replace(chat_cfg, thinking=False)
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            extracted = list(ex.map(lambda s: extract_atoms(backend, extract_fast, s),
-                                    g["sessions"]))
+        # 与 V3 共享抽取磁盘缓存（V3 建过缓存则此处零 LLM 成本）
+        from systems.v3_layered import extract_group_cached
+        extracted = extract_group_cached(backend, chat_cfg, g)
         for s, atom_dicts in zip(g["sessions"], extracted):
             atoms.apply_atoms(s, atom_dicts)
         from systems.v2_dense import DenseIndex

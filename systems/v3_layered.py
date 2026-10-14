@@ -368,6 +368,45 @@ def answer_question(store: MemoryStore, index: DenseIndex, backend: OpenAICompat
 # 流水线
 # --------------------------------------------------------------------------
 
+_ATOM_CACHE_DIR = Path("runs/atom_cache")
+
+
+def _group_cache_key(g: dict) -> str:
+    import hashlib
+    raw = json.dumps([[s.session_id, s.date] for s in g["sessions"]], sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+def _load_cached_atoms(g: dict) -> list | None:
+    p = _ATOM_CACHE_DIR / (_group_cache_key(g) + ".json")
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if len(data) == len(g["sessions"]):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def extract_group_cached(backend, extract_cfg, g: dict) -> list:
+    """组内抽取（带磁盘缓存）：V3 与 V5 共享，重跑/跨版本零成本。"""
+    cached = _load_cached_atoms(g)
+    if cached is not None:
+        return cached
+    import dataclasses
+    extract_fast = dataclasses.replace(extract_cfg, thinking=False)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        extracted = list(ex.map(lambda s: extract_atoms(backend, extract_fast, s),
+                                g["sessions"]))
+    _ATOM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    p = _ATOM_CACHE_DIR / (_group_cache_key(g) + ".json")
+    p.write_text(json.dumps(extracted, ensure_ascii=False), encoding="utf-8")
+    return extracted
+
+
 def run(questions: list[dict], out_dir: str | Path, tag: str = "v3",
         model_cfg: ModelConfig | None = None, extract_cfg: ModelConfig | None = None,
         limit: int | None = None, workers: int = 3) -> dict:
@@ -385,13 +424,7 @@ def run(questions: list[dict], out_dir: str | Path, tag: str = "v3",
     def build_group(g):
         store = MemoryStore(":memory:")
         atoms = AtomStore(store)
-        # 抽取禁用思考：速度快 2-3 倍，且避免思考吞掉 token 预算截断 JSON 输出
-        import dataclasses
-        extract_fast = dataclasses.replace(extract_cfg, thinking=False)
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            extracted = list(ex.map(lambda s: extract_atoms(backend, extract_fast, s),
-                                    g["sessions"]))
+        extracted = extract_group_cached(backend, extract_cfg, g)
         for s, atom_dicts in zip(g["sessions"], extracted):
             atoms.apply_atoms(s, atom_dicts)
         index = DenseIndex()
