@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# 运行产物与数据
+runs/
+data/longmemeval/*.json
+data/longmemeval/*.jsonl
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 密钥
+.env

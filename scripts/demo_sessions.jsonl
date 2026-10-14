@@ -1,0 +1,2 @@
+{"session_id": "demo-1", "date": "2024-01-10", "turns": [{"role": "user", "content": "你好，我叫小明，今年29岁。我住在北京，是一名软件工程师。"}, {"role": "assistant", "content": "你好小明！很高兴认识你。"}, {"role": "user", "content": "我特别喜欢蓝色的毛衣，周末经常去爬山。"}]}
+{"session_id": "demo-2", "date": "2024-03-02", "turns": [{"role": "user", "content": "跟你说个事，我上个月搬到上海了，现在做数据科学家的工作。"}, {"role": "assistant", "content": "恭喜搬家顺利！"}, {"role": "user", "content": "我现在更喜欢穿红色的外套，爬山改成了跑步。"}]}

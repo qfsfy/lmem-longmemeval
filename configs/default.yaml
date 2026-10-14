@@ -1,0 +1,42 @@
+# lmem harness 默认配置
+# 说明：所有字段都有内置默认值，此文件只覆盖需要修改的项。
+# API Key 一律从环境变量读取（见 .env.example），不要写进本文件。
+
+backend: auto          # auto=有 Key 走 API，否则 Mock 演示模式；可强制 openai / mock
+store_path: runs/store.sqlite3
+
+flash:                 # 快/省档：写入管线、查询分析、rerank、默认生成
+  name: glm-5.3-flash
+  base_url: https://open.bigmodel.cn/api/paas/v4   # Z.ai 用户改为 https://api.z.ai/api/paas/v4
+  api_key_env: ZAI_API_KEY
+  temperature: 0.2
+  max_tokens: 1500
+
+flagship:              # 旗舰档：复杂推理与低置信仲裁
+  name: glm-5.3
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  api_key_env: ZAI_API_KEY
+  temperature: 0.2
+  max_tokens: 2000
+
+judge:                 # 评测裁判（开发期）；对外正式报告用官方 GPT-4o judge
+  name: glm-5.3
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  api_key_env: ZAI_API_KEY
+
+router:
+  strategy: cascade                # flash_only | cascade | by_type | flagship_only
+  cascade_confidence: 0.55         # Flash 自评置信度低于该值 → 升级 5.3
+
+gate:
+  coverage_min: 0.25               # 证据覆盖率低于该值 → 拒答
+  confidence_min: 0.30             # 生成置信度低于该值且证据为空 → 拒答
+
+retriever:
+  bm25_top_k: 24
+  final_top_k: 8
+  as_of_filter: true               # 按问题时间只召回“当时仍有效”的记忆
+  profile_max: 5
+
+writer:
+  supersede_on_conflict: true      # 同主体同谓词新值 → 旧卡失效（保留历史版本）
