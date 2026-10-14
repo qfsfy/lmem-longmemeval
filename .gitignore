@@ -19,3 +19,4 @@ data/longmemeval/*.jsonl
 .env
 reference/
 runs/
+.models/
