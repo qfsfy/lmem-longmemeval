@@ -397,7 +397,7 @@ def extract_group_cached(backend, extract_cfg, g: dict) -> list:
     import dataclasses
     extract_fast = dataclasses.replace(extract_cfg, thinking=False)
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         extracted = list(ex.map(lambda s: extract_atoms(backend, extract_fast, s),
                                 g["sessions"]))
     _ATOM_CACHE_DIR.mkdir(parents=True, exist_ok=True)

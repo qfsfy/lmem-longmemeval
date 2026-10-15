@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Type
@@ -48,6 +49,34 @@ class BaseBackend:
         raise NotImplementedError
 
 
+class _RateLimiter:
+    """进程内全局限速：相邻请求最小间隔（ coding plan 的 RPM 限制按突发计）。
+
+    环境变量 LLM_MIN_INTERVAL 可调（秒），默认 1.0。
+    """
+
+    _lock = threading.Lock()
+    _last = 0.0
+
+    @classmethod
+    def wait_turn(cls) -> None:
+        import os
+        interval = float(os.environ.get("LLM_MIN_INTERVAL", "1.0"))
+        if interval <= 0:
+            return
+        while True:
+            with cls._lock:
+                now = time.monotonic()
+                wait = cls._last + interval - now
+                if wait <= 0:
+                    cls._last = time.monotonic()
+                    return
+            time.sleep(min(wait, 0.5))
+
+
+_rate_limiter = _RateLimiter()
+
+
 class OpenAICompatBackend(BaseBackend):
     """OpenAI 兼容 Chat Completions 客户端（含 JSON 模式 + 一次解析重试）。"""
 
@@ -68,7 +97,8 @@ class OpenAICompatBackend(BaseBackend):
     def _create_with_retry(client: Any, kwargs: dict) -> Any:
         """429/5xx/连接错误退避重试（coding plan 等严格限流端点必需）。"""
         last_exc: Optional[Exception] = None
-        for attempt in range(8):
+        for attempt in range(12):
+            _rate_limiter.wait_turn()
             try:
                 return client.chat.completions.create(**kwargs)
             except Exception as e:  # noqa: BLE001 - 按异常类名分流
@@ -77,7 +107,7 @@ class OpenAICompatBackend(BaseBackend):
                                                "InternalServerError", "Timeout")):
                     raise
                 last_exc = e
-                wait = min(60.0, (2 ** attempt) * 2.5)
+                wait = min(90.0, (2 ** min(attempt, 5)) * 2.5)
                 print(f"[llm] {name}, backoff {wait:.0f}s (attempt {attempt + 1})",
                       file=sys.stderr, flush=True)
                 time.sleep(wait)
