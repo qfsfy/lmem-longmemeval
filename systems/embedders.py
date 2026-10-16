@@ -80,23 +80,72 @@ class ZhipuEmbedder:
 
 
 class LocalEmbedder:
-    """fastembed bge-small-en-v1.5（与 V2 原实现一致的离线路径）。"""
+    """bge-small-en-v1.5 直连 ONNX（不经 fastembed）。
+
+    2026-10-16 事故复盘：onnxruntime 的 BFC arena 在变长 batch 下单调增长不释放
+    （多次 embed 后进程 RSS 达 8GB+）。这里直接建 Session 并设
+    enable_cpu_mem_arena=False，显存即时归还、内存有界；mean pooling + L2
+    与 fastembed 对该模型的后处理保持一致。
+    """
+
+    BATCH = 32
+    MAX_LEN = 192  # 记忆卡均值 ~30 token、上限 60 词；192 足够，且把注意力激活峰值压低 ~7 倍
 
     def __init__(self) -> None:
-        from fastembed import TextEmbedding
-        self._m = TextEmbedding("BAAI/bge-small-en-v1.5")
-        self.name = "bge-small-en-v1.5"
+        import os
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        local = Path(os.environ.get(
+            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed")))
+        snaps = list(local.glob("models--Qdrant--bge-small-en-v1.5-onnx-Q/snapshots/*"))
+        if not snaps:
+            raise FileNotFoundError("bge-small onnx 模型未找到，请先运行一次 fastembed 下载")
+        snap = snaps[0]
+        self.name = "bge-small-en-v1.5-onnx"
+
+        self._tok = Tokenizer.from_file(str(snap / "tokenizer.json"))
+        self._tok.enable_truncation(max_length=self.MAX_LEN)
+
+        so = ort.SessionOptions()
+        so.enable_cpu_mem_arena = False  # 关键：arena 关闭，防止内存无限增长
+        so.intra_op_num_threads = int(os.environ.get("EMBED_THREADS", "4"))
+        so.inter_op_num_threads = 1
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.sess = ort.InferenceSession(str(snap / "model_optimized.onnx"),
+                                         sess_options=so,
+                                         providers=["CPUExecutionProvider"])
+        self._input_names = {i.name for i in self.sess.get_inputs()}
+
+    def _forward(self, texts: list[str]):
+        import numpy as np
+        enc = self._tok.encode_batch(texts)
+        maxlen = max(len(e.ids) for e in enc)
+        ids = np.zeros((len(enc), maxlen), dtype=np.int64)
+        mask = np.zeros((len(enc), maxlen), dtype=np.int64)
+        for i, e in enumerate(enc):
+            n = len(e.ids)
+            ids[i, :n] = e.ids
+            mask[i, :n] = e.attention_mask
+        feeds = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in self._input_names:
+            feeds["token_type_ids"] = np.zeros_like(ids)
+        out = self.sess.run(None, feeds)[0]  # (B, L, H) last_hidden_state
+        mask_f = mask[:, :, None].astype(np.float32)
+        summed = (out * mask_f).sum(axis=1)
+        counts = np.clip(mask_f.sum(axis=1), 1e-9, None)
+        mean = summed / counts
+        norm = np.linalg.norm(mean, axis=1, keepdims=True)
+        return mean / np.maximum(norm, 1e-9)
 
     def embed(self, texts: list[str]):
-        import numpy as np
         vecs = []
-        for i in range(0, len(texts), 64):
-            vecs.extend(self._m.embed(texts[i:i + 64]))
-        return [np.asarray(v, dtype=np.float32) for v in vecs]
+        for i in range(0, len(texts), self.BATCH):
+            vecs.extend(self._forward(texts[i:i + self.BATCH]))
+        return vecs
 
     def query_embed(self, questions: list[str]):
-        import numpy as np
-        return [np.asarray(v, dtype=np.float32) for v in self._m.query_embed(questions)]
+        return self.embed(questions)
 
 
 def make_embedder():
