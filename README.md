@@ -16,7 +16,7 @@
 | V3 分层记忆 | 语义原子 + 情景保底 | LLM 记忆原子 + 规则句双层 | 混合 + 原子引文去重 | 时序/聚合读取协议 | 全量 0.840ᶻ |
 | V4 路由+恢复 | 读取端两杠杆 | 同 V1 | 同 V1 | 题型路由旗舰 + 假拒答 two-pass 捞回 | 全量 0.820ᶻ |
 | V5 融合旗舰 | V3 × V4 | 双层原子 | 混合 + 去重 | 路由 + 恢复 | 全量 **0.898**ᶻ |
-| V6 优化旗舰 | embedding-3 + 路由核验 + 偏好个性化 | 同 V5 | 智谱 embedding-3 混合 | 路由 + 恢复 + 证据核验 | 运行中 |
+| V6 优化尝试 | 核验 + 偏好个性化 | 同 V5 | 同 V5（V6.0 曾试 embedding-3） | 路由 + 恢复 + 证据核验 | V6.0 0.838 / V6.1 0.892 / V6.2 0.894ᶻ——未超 V5，**交付 V5** |
 
 ᶻ = 智谱口径（glm-5.3-flash 答题/判分，难题路由 glm-5.3），官方 grader prompt；
 另有口径D（DeepSeek）快照：V1 0.714 / V2 0.696。正式得分由项目组以 GPT-4o judge 统一复跑。
@@ -38,8 +38,9 @@ curl -L -o data/longmemeval/longmemeval_oracle.json \
   "https://hf-mirror.com/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
 
 # 2a) API 口径：配置 .env（见 .env.example：ZAI_CODING_KEY / DEEPSEEK_API_KEY / ZHIPU_EMBED_KEY）
-.venv/Scripts/python run.py eval --system v1 --subset 50      # 50 题分层快评
-.venv/Scripts/python run.py judge runs/v1/hyp_v1_sub50_zh.jsonl  # 官方口径判分
+.venv/Scripts/python run.py eval --system v5 --subset 50      # 50 题分层快评
+.venv/Scripts/python run.py judge runs/v5/hyp_v5_sub50_zh.jsonl  # 官方口径判分
+# 全量: --system v5 (去掉 --subset)；嵌入后端可选 EMBED_BACKEND=fastembed|zhipu|onnx|onnx_sub
 
 # 2b) 本地口径（零 API 成本）：启动 llama-server 后加 --backend local
 scripts/start_local_server.bat
