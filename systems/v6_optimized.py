@@ -76,10 +76,11 @@ def answer_v6(store: MemoryStore, index, backend: OpenAICompatBackend, chat_cfg:
     meta["model"] = model_cfg.name
 
     # 路由答案核验：旗舰答案须通过 flash 的证据一致性检查（防过度自信的幻觉，
-    # 尤其保护 unanswerable 题；不使用任何题目侧信息）
+    # 尤其保护 unanswerable 题；不使用任何题目侧信息）。
+    # 注意：必须用答案所依据的全部证据核验——V6.0 曾用 top-10 子集，
+    # 导致基于 48 条证据的聚合答案被误杀（multi-session -14pt 的根因）。
     if routed and ans and ans.lower().strip(". !") != ABSTAIN_PHRASE:
-        focus = cards[:10]
-        vlines = _build_evidence_lines(focus)
+        vlines = _build_evidence_lines(cards)
         vuser = (f"Question: {question}\n\nProposed answer: {ans}\n\n"
                  "Memories:\n" + "\n".join(vlines) +
                  "\n\nIs the proposed answer directly supported by the memories? yes or no.")

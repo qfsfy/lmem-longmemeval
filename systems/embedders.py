@@ -1,10 +1,13 @@
-"""可插拔语义向量后端。
+"""可插拔语义向量后端（V6.1 修订）。
 
-- ZhipuEmbedder：智谱 embedding-3（1024 维，批量 64，sqlite 逐文本缓存，跨重跑零成本）；
-- LocalEmbedder：fastembed bge-small-en-v1.5（离线备用，零 API 成本）。
-
-选择逻辑（make_embedder）：环境变量 EMBED_BACKEND=zhipu|fastembed|auto（默认 auto：
-有 ZHIPU_EMBED_KEY 走智谱，否则本地）。
+三个实现（EMBED_BACKEND 选择）：
+- fastembed（默认，= V5 精确路径）：官方 fastembed bge-small-en-v1.5，与 V2/V3/V5
+  全量结果完全同分布；其原生内存在分块 runner 下实测可完成全量（V3/V5 先例）。
+- onnx：直连 ONNX + arena 关闭（MAX_LEN 192 / BATCH 32）——内存有界但截断与
+  分词细节与 fastembed 存在分布差异，V6.0 全量 0.838 证明会损失检索质量，仅备用。
+- onnx_sub：同上但子进程隔离（彻底防碎片增长），同样仅备用。
+- zhipu：智谱 embedding-3 API（逐文本 sqlite 缓存）；当前 key 持续 RPM 过低
+  （~17 向量/分钟）不足以全量，换高配额 key 即可启用。
 """
 
 from __future__ import annotations
@@ -21,8 +24,121 @@ from pathlib import Path
 _CACHE_PATH = Path("runs/emb_cache.sqlite3")
 
 
+class FastembedEmbedder:
+    """V5 精确路径：fastembed bge-small-en-v1.5（batch 256、512 截断，均与 V5 相同）。"""
+
+    def __init__(self) -> None:
+        from fastembed import TextEmbedding
+        self._m = TextEmbedding("BAAI/bge-small-en-v1.5")
+        self.name = "bge-small-en-v1.5"
+
+    def embed(self, texts: list[str]):
+        import numpy as np
+        vecs = []
+        for i in range(0, len(texts), 256):
+            vecs.extend(self._m.embed(texts[i:i + 256]))
+        return [np.asarray(v, dtype=np.float32) for v in vecs]
+
+    def query_embed(self, questions: list[str]):
+        import numpy as np
+        return [np.asarray(v, dtype=np.float32) for v in self._m.query_embed(questions)]
+
+
+class DirectOnnxEmbedder:
+    """直连 ONNX + arena 关闭（备用：内存有界，但与 fastembed 分布存在差异）。"""
+
+    BATCH = 32
+    MAX_LEN = 192
+
+    def __init__(self) -> None:
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        local = Path(os.environ.get(
+            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed")))
+        snaps = list(local.glob("models--Qdrant--bge-small-en-v1.5-onnx-Q/snapshots/*"))
+        if not snaps:
+            raise FileNotFoundError("bge-small onnx 模型未找到")
+        snap = snaps[0]
+        self.name = "bge-small-en-v1.5-onnx"
+
+        self._tok = Tokenizer.from_file(str(snap / "tokenizer.json"))
+        self._tok.enable_truncation(max_length=self.MAX_LEN)
+
+        so = ort.SessionOptions()
+        so.enable_cpu_mem_arena = False
+        so.intra_op_num_threads = int(os.environ.get("EMBED_THREADS", "4"))
+        so.inter_op_num_threads = 1
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.sess = ort.InferenceSession(str(snap / "model_optimized.onnx"),
+                                         sess_options=so,
+                                         providers=["CPUExecutionProvider"])
+        self._input_names = {i.name for i in self.sess.get_inputs()}
+
+    def _forward(self, texts: list[str]):
+        import numpy as np
+        enc = self._tok.encode_batch(texts)
+        maxlen = max(len(e.ids) for e in enc)
+        ids = np.zeros((len(enc), maxlen), dtype=np.int64)
+        mask = np.zeros((len(enc), maxlen), dtype=np.int64)
+        for i, e in enumerate(enc):
+            n = len(e.ids)
+            ids[i, :n] = e.ids
+            mask[i, :n] = e.attention_mask
+        feeds = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in self._input_names:
+            feeds["token_type_ids"] = np.zeros_like(ids)
+        out = self.sess.run(None, feeds)[0]
+        mask_f = mask[:, :, None].astype(np.float32)
+        summed = (out * mask_f).sum(axis=1)
+        counts = np.clip(mask_f.sum(axis=1), 1e-9, None)
+        mean = summed / counts
+        norm = np.linalg.norm(mean, axis=1, keepdims=True)
+        return mean / np.maximum(norm, 1e-9)
+
+    def embed(self, texts: list[str]):
+        vecs = []
+        for i in range(0, len(texts), self.BATCH):
+            vecs.extend(self._forward(texts[i:i + self.BATCH]))
+        return vecs
+
+    def query_embed(self, questions: list[str]):
+        return self.embed(questions)
+
+
+class SubprocessEmbedder:
+    """DirectOnnxEmbedder 的子进程隔离封装（备用：根治原生内存碎片增长）。"""
+
+    BATCH = 1024
+
+    def __init__(self) -> None:
+        self._python = sys.executable
+        self._worker = str(Path(__file__).resolve().parent / "embed_worker.py")
+        self.name = "bge-small-en-v1.5-onnx"
+
+    def embed(self, texts: list[str]):
+        out: list = []
+        env = dict(os.environ)
+        env["FASTEMBED_CACHE_PATH"] = env.get(
+            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed"))
+        for start in range(0, len(texts), self.BATCH):
+            batch = texts[start:start + self.BATCH]
+            r = subprocess.run(
+                [self._python, self._worker],
+                input=json.dumps(batch), capture_output=True, text=True,
+                encoding="utf-8", timeout=600, env=env)
+            if r.returncode != 0:
+                raise RuntimeError(f"embed worker failed: {r.stderr[-400:]}")
+            payload = json.loads(r.stdout.strip().splitlines()[-1])
+            out.extend(payload["vecs"])
+        return out
+
+    def query_embed(self, questions: list[str]):
+        return self.embed(questions)
+
+
 class ZhipuEmbedder:
-    """智谱 embedding-3：OpenAI 兼容 /embeddings，逐文本磁盘缓存。"""
+    """智谱 embedding-3（1024 维，逐文本 sqlite 缓存）。"""
 
     BATCH = 64
 
@@ -57,7 +173,7 @@ class ZhipuEmbedder:
                 time.sleep(wait)
         raise RuntimeError("unreachable")
 
-    def embed(self, texts: list[str]) -> "object":
+    def embed(self, texts: list[str]):
         import numpy as np
         out: list = [None] * len(texts)
         missing: list[int] = []
@@ -82,117 +198,17 @@ class ZhipuEmbedder:
         return self.embed(questions)
 
 
-class LocalEmbedder:
-    """bge-small-en-v1.5 直连 ONNX（不经 fastembed）。
-
-    2026-10-16 事故复盘：onnxruntime 的 BFC arena 在变长 batch 下单调增长不释放
-    （多次 embed 后进程 RSS 达 8GB+）。这里直接建 Session 并设
-    enable_cpu_mem_arena=False，显存即时归还、内存有界；mean pooling + L2
-    与 fastembed 对该模型的后处理保持一致。
-    """
-
-    BATCH = 32
-    MAX_LEN = 192  # 记忆卡均值 ~30 token、上限 60 词；192 足够，且把注意力激活峰值压低 ~7 倍
-
-    def __init__(self) -> None:
-        import os
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
-
-        local = Path(os.environ.get(
-            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed")))
-        snaps = list(local.glob("models--Qdrant--bge-small-en-v1.5-onnx-Q/snapshots/*"))
-        if not snaps:
-            raise FileNotFoundError("bge-small onnx 模型未找到，请先运行一次 fastembed 下载")
-        snap = snaps[0]
-        self.name = "bge-small-en-v1.5-onnx"
-
-        self._tok = Tokenizer.from_file(str(snap / "tokenizer.json"))
-        self._tok.enable_truncation(max_length=self.MAX_LEN)
-
-        so = ort.SessionOptions()
-        so.enable_cpu_mem_arena = False  # 关键：arena 关闭，防止内存无限增长
-        so.intra_op_num_threads = int(os.environ.get("EMBED_THREADS", "4"))
-        so.inter_op_num_threads = 1
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.sess = ort.InferenceSession(str(snap / "model_optimized.onnx"),
-                                         sess_options=so,
-                                         providers=["CPUExecutionProvider"])
-        self._input_names = {i.name for i in self.sess.get_inputs()}
-
-    def _forward(self, texts: list[str]):
-        import numpy as np
-        enc = self._tok.encode_batch(texts)
-        maxlen = max(len(e.ids) for e in enc)
-        ids = np.zeros((len(enc), maxlen), dtype=np.int64)
-        mask = np.zeros((len(enc), maxlen), dtype=np.int64)
-        for i, e in enumerate(enc):
-            n = len(e.ids)
-            ids[i, :n] = e.ids
-            mask[i, :n] = e.attention_mask
-        feeds = {"input_ids": ids, "attention_mask": mask}
-        if "token_type_ids" in self._input_names:
-            feeds["token_type_ids"] = np.zeros_like(ids)
-        out = self.sess.run(None, feeds)[0]  # (B, L, H) last_hidden_state
-        mask_f = mask[:, :, None].astype(np.float32)
-        summed = (out * mask_f).sum(axis=1)
-        counts = np.clip(mask_f.sum(axis=1), 1e-9, None)
-        mean = summed / counts
-        norm = np.linalg.norm(mean, axis=1, keepdims=True)
-        return mean / np.maximum(norm, 1e-9)
-
-    def embed(self, texts: list[str]):
-        vecs = []
-        for i in range(0, len(texts), self.BATCH):
-            vecs.extend(self._forward(texts[i:i + self.BATCH]))
-        return vecs
-
-    def query_embed(self, questions: list[str]):
-        return self.embed(questions)
-
-
 def make_embedder():
+    """默认 = FastembedEmbedder（V5 精确路径，保证与已发布结果同分布）。"""
     import os
-    import sys
-    backend = os.environ.get("EMBED_BACKEND", "auto")
-    key = os.environ.get("ZHIPU_EMBED_KEY")
-    if backend == "fastembed":
-        # 本地 ONNX 走子进程隔离：onnxruntime 的原生分配在 Windows 上随变长 batch
-        # 碎片化增长（进程 RSS 可达 8GB+ 且 arena=False 也无法阻止），子进程每批
-        # 退出一次即彻底释放，主进程只保留向量本身。
-        return SubprocessEmbedder()
-    if backend == "zhipu" or (backend == "auto" and key):
+    backend = os.environ.get("EMBED_BACKEND", "fastembed")
+    if backend == "zhipu":
+        key = os.environ.get("ZHIPU_EMBED_KEY")
+        if not key:
+            raise RuntimeError("EMBED_BACKEND=zhipu 需要 ZHIPU_EMBED_KEY")
         return ZhipuEmbedder(api_key=key)
-    return SubprocessEmbedder()
-
-
-class SubprocessEmbedder:
-    """LocalEmbedder 的子进程隔离封装（每批一个子进程，退出即释放原生内存）。"""
-
-    BATCH = 1024
-
-    def __init__(self) -> None:
-        import subprocess
-        self._python = sys.executable
-        self._worker = str(Path(__file__).resolve().parent / "embed_worker.py")
-        self.name = "bge-small-en-v1.5-onnx"
-
-    def embed(self, texts: list[str]):
-        out: list = []
-        env = dict(os.environ)
-        env["FASTEMBED_CACHE_PATH"] = env.get(
-            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed"))
-        for start in range(0, len(texts), self.BATCH):
-            batch = texts[start:start + self.BATCH]
-            r = subprocess.run(
-                [self._python, self._worker],
-                input=json.dumps(batch), capture_output=True, text=True,
-                encoding="utf-8", timeout=600, env=env)
-            if r.returncode != 0:
-                raise RuntimeError(f"embed worker failed: {r.stderr[-400:]}")
-            payload = json.loads(r.stdout.strip().splitlines()[-1])
-            out.extend(payload["vecs"])
-        return out
-
-    def query_embed(self, questions: list[str]):
-        return self.embed(questions)
+    if backend == "onnx":
+        return DirectOnnxEmbedder()
+    if backend == "onnx_sub":
+        return SubprocessEmbedder()
+    return FastembedEmbedder()
