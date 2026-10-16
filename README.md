@@ -11,35 +11,42 @@
 
 | 版本 | 一句话 | 写入 | 检索 | 读取 | 状态 |
 |---|---|---|---|---|---|
-| V1 词法笔记 | 零 LLM 的透明基线 | 规则信息句（寒暄过滤/身份归一） | 自研 BM25 + 画像直取 | LLM 短答案 + 计数协议 | 全量 **0.714**ᴰ |
-| V2 稠密语义 | +向量混合检索 | 同 V1 | BM25 ∥ bge-small 余弦 → RRF | 同 V1 | 全量 0.696ᴰ（负结果，保留架构） |
-| V3 分层记忆 | 语义原子 + 情景保底 | LLM 记忆原子 + 规则句双层 | 混合 + 原子引文去重 | 时序/聚合读取协议 | 子集 0.700ᴰ（故障态 0.440 → 修复） |
-| V4 路由+恢复 | 读取端两杠杆 | 同 V1 | 同 V1 | 题型路由 reasoner + 假拒答 two-pass 捞回 | 子集 **0.760**ᴰ |
-| V5 融合旗舰 | V3 × V4 | 双层原子 | 混合 + 去重 | 路由 + 恢复 | 本地口径评测中 |
+| V1 词法笔记 | 零 LLM 的透明基线 | 规则信息句（寒暄过滤/身份归一） | 自研 BM25 + 画像直取 | LLM 短答案 + 计数协议 | 全量 **0.782**ᶻ |
+| V2 稠密语义 | +向量混合检索 | 同 V1 | BM25 ∥ bge-small 余弦 → RRF | 同 V1 | 全量 0.812ᶻ |
+| V3 分层记忆 | 语义原子 + 情景保底 | LLM 记忆原子 + 规则句双层 | 混合 + 原子引文去重 | 时序/聚合读取协议 | 全量 0.840ᶻ |
+| V4 路由+恢复 | 读取端两杠杆 | 同 V1 | 同 V1 | 题型路由旗舰 + 假拒答 two-pass 捞回 | 全量 0.820ᶻ |
+| V5 融合旗舰 | V3 × V4 | 双层原子 | 混合 + 去重 | 路由 + 恢复 | 全量 **0.898**ᶻ |
+| V6 优化旗舰 | embedding-3 + 路由核验 + 偏好个性化 | 同 V5 | 智谱 embedding-3 混合 | 路由 + 恢复 + 证据核验 | 运行中 |
 
-ᴰ = DeepSeek-chat 答题 + 官方 grader prompt（DeepSeek 复判）的开发期口径；正式得分由项目组以 GPT-4o judge 统一复跑。
+ᶻ = 智谱口径（glm-5.3-flash 答题/判分，难题路由 glm-5.3），官方 grader prompt；
+另有口径D（DeepSeek）快照：V1 0.714 / V2 0.696。正式得分由项目组以 GPT-4o judge 统一复跑。
 
 ## 快速开始
 
+> **环境说明**：本仓库的评测流水线只依赖轻量 Python 包，**无需 conda**——官方
+> LongMemEval 仓库的 conda 环境仅在复现其 RAG/长上下文基线时需要；本仓库只使用其
+> 数据集（MIT 许可，15MB）与判分协议（grader prompt，见诚信声明）。CUDA 仅在启用
+> 本地 llama.cpp 备用后端时用到（RTX 6GB 即可）。
+
 ```bash
-# 0) 环境（Python ≥3.10；阿里云镜像）
+# 0) 环境（Python >= 3.10；国内建议阿里云镜像 pip install -i https://mirrors.aliyun.com/pypi/simple/）
 python -m venv .venv
-.venv/Scripts/python -m pip install numpy openai pydantic PyYAML typer rich pytest fastembed
+.venv/Scripts/python -m pip install -r requirements.txt
 
 # 1) 数据（hf-mirror 下载 Oracle 档，15MB）
 curl -L -o data/longmemeval/longmemeval_oracle.json \
   "https://hf-mirror.com/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
 
-# 2a) API 口径：配置 .env（见 .env.example：DEEPSEEK_API_KEY 或 ZAI_API_KEY）
+# 2a) API 口径：配置 .env（见 .env.example：ZAI_CODING_KEY / DEEPSEEK_API_KEY / ZHIPU_EMBED_KEY）
 .venv/Scripts/python run.py eval --system v1 --subset 50      # 50 题分层快评
-.venv/Scripts/python run.py judge runs/v1/hyp_v1_sub50.jsonl  # 官方口径判分
+.venv/Scripts/python run.py judge runs/v1/hyp_v1_sub50_zh.jsonl  # 官方口径判分
 
 # 2b) 本地口径（零 API 成本）：启动 llama-server 后加 --backend local
-.tools/llama.cpp/llama-server.exe -m .models/qwen3-4b-instruct-2507-q4km.gguf \
-    -ngl 99 -c 8192 --host 127.0.0.1 --port 8321
+scripts/start_local_server.bat
 .venv/Scripts/python run.py eval --system v5 --backend local
 
 # 3) 交互体验（含 Mock 离线模式）
+.venv/Scripts/python run.py test                                # 离线冒烟测试
 .venv/Scripts/python -m lmem.cli ui
 ```
 

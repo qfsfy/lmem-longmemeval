@@ -1,0 +1,13 @@
+# 运行最小依赖（Python >= 3.10）
+numpy>=1.26
+openai>=1.40
+pydantic>=2.7
+PyYAML>=6.0
+typer>=0.12
+rich>=13.0
+
+# 评测/开发
+pytest>=8.0
+
+# 语义向量（本地离线路径；智谱 embedding-3 走 API 无需此包）
+fastembed>=0.3
