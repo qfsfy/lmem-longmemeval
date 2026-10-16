@@ -13,9 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("EMBED_THREADS", "6")
 
-from systems.embedders import LocalEmbedder  # noqa: E402
+import systems.embedders as em  # noqa: E402
 
 texts = json.loads(sys.stdin.read())
-emb = LocalEmbedder()
+kind = os.environ.get("WORKER_EMBEDDER", "onnx")
+emb = em.FastembedEmbedder() if kind == "fastembed" else em.LocalEmbedder()
 vecs = emb.embed(texts)
 print(json.dumps({"name": emb.name, "vecs": [v.tolist() for v in vecs]}))

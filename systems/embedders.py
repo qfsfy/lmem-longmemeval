@@ -27,6 +27,9 @@ _CACHE_PATH = Path("runs/emb_cache.sqlite3")
 class FastembedEmbedder:
     """V5 精确路径：fastembed bge-small-en-v1.5（batch 256、512 截断，均与 V5 相同）。"""
 
+    BATCH = 32  # batch 256 x seq512 的注意力瞬时分配 3.2GB/层, 会打出 9GB RSS 尖峰;
+    # mask 感知 mean pooling 下批大小不影响结果, 降批安全
+
     def __init__(self) -> None:
         from fastembed import TextEmbedding
         self._m = TextEmbedding("BAAI/bge-small-en-v1.5")
@@ -35,8 +38,8 @@ class FastembedEmbedder:
     def embed(self, texts: list[str]):
         import numpy as np
         vecs = []
-        for i in range(0, len(texts), 256):
-            vecs.extend(self._m.embed(texts[i:i + 256]))
+        for i in range(0, len(texts), self.BATCH):
+            vecs.extend(self._m.embed(texts[i:i + self.BATCH]))
         return [np.asarray(v, dtype=np.float32) for v in vecs]
 
     def query_embed(self, questions: list[str]):
@@ -111,14 +114,16 @@ class SubprocessEmbedder:
 
     BATCH = 1024
 
-    def __init__(self) -> None:
+    def __init__(self, worker_embedder: str = "onnx") -> None:
         self._python = sys.executable
         self._worker = str(Path(__file__).resolve().parent / "embed_worker.py")
-        self.name = "bge-small-en-v1.5-onnx"
+        self._worker_embedder = worker_embedder
+        self.name = "bge-small-en-v1.5" if worker_embedder == "fastembed"             else "bge-small-en-v1.5-onnx"
 
     def embed(self, texts: list[str]):
         out: list = []
         env = dict(os.environ)
+        env["WORKER_EMBEDDER"] = self._worker_embedder
         env["FASTEMBED_CACHE_PATH"] = env.get(
             "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed"))
         for start in range(0, len(texts), self.BATCH):
@@ -210,5 +215,7 @@ def make_embedder():
     if backend == "onnx":
         return DirectOnnxEmbedder()
     if backend == "onnx_sub":
-        return SubprocessEmbedder()
-    return FastembedEmbedder()
+        return SubprocessEmbedder(worker_embedder="onnx")
+    # fastembed（默认）也走子进程隔离：其 ORT session 的 arena 在变长 batch 下
+    # 同样会碎片化增长（实测单进程 RSS 8GB+），子进程退出即彻底释放
+    return SubprocessEmbedder(worker_embedder="fastembed")
