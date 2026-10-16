@@ -12,7 +12,7 @@ from systems.v1_lexical import deepseek_config, load_env, local_config, run, \
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="LongMemEval Oracle 评测驱动")
-    ap.add_argument("--system", default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
+    ap.add_argument("--system", default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6"])
     ap.add_argument("--backend", default="deepseek",
                     choices=["deepseek", "local", "zhipu"],
                     help="zhipu=智谱 coding plan（glm-5.3-flash 答题/判分, glm-5.3 路由）")
@@ -73,6 +73,15 @@ def main(argv: list[str] | None = None) -> None:
         else:
             run_v5(questions, out, tag=tag, model_cfg=model_cfg,
                    use_reasoner=(args.backend == "deepseek"), **common)
+    elif args.system == "v6":
+        from systems.v6_optimized import run as run_v6
+        if args.backend in ("zhipu", "deepseek"):
+            from systems.v1_lexical import zhipu_flagship_config
+            flagship = zhipu_flagship_config() if args.backend == "zhipu" else None
+            run_v6(questions, out, tag=tag, model_cfg=model_cfg,
+                   flagship_cfg=flagship, **common)
+        else:  # local：无旗舰路由
+            run_v6(questions, out, tag=tag, model_cfg=model_cfg, flagship_cfg=None, **common)
 
 
 if __name__ == "__main__":

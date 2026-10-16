@@ -58,9 +58,13 @@ def _l2(mat: np.ndarray) -> np.ndarray:
 
 
 class DenseIndex:
-    """组内稠密索引：card_id -> 归一化向量；numpy 暴力余弦。"""
+    """组内稠密索引：card_id -> 归一化向量；embedder 可插拔（智谱 API / 本地 fastembed）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, embedder=None) -> None:
+        if embedder is None:
+            from systems.embedders import make_embedder
+            embedder = make_embedder()
+        self.embedder = embedder
         self.ids: list[str] = []
         self.mat: np.ndarray | None = None
 
@@ -68,9 +72,7 @@ class DenseIndex:
         if not cards:
             return
         texts = [c.content for c in cards]
-        vecs: list[np.ndarray] = []
-        for i in range(0, len(texts), 64):
-            vecs.extend(_model().embed(texts[i:i + 64]))
+        vecs = self.embedder.embed(texts)
         mat = _l2(np.array(vecs, dtype=np.float32))
         self.ids.extend(c.id for c in cards)
         self.mat = mat if self.mat is None else np.vstack([self.mat, mat])
@@ -78,7 +80,7 @@ class DenseIndex:
     def search(self, question: str, allowed: set[str], k: int) -> list[tuple[str, float]]:
         if self.mat is None or not self.ids:
             return []
-        q = _l2(np.array(list(_model().query_embed([question])), dtype=np.float32))[0]
+        q = _l2(np.array(list(self.embedder.query_embed([question])), dtype=np.float32))[0]
         sims = self.mat @ q
         order = np.argsort(-sims)
         out: list[tuple[str, float]] = []
