@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -150,8 +153,46 @@ class LocalEmbedder:
 
 def make_embedder():
     import os
+    import sys
     backend = os.environ.get("EMBED_BACKEND", "auto")
     key = os.environ.get("ZHIPU_EMBED_KEY")
-    if backend == "fastembed" or (backend == "auto" and not key):
-        return LocalEmbedder()
-    return ZhipuEmbedder(api_key=key)
+    if backend == "fastembed":
+        # 本地 ONNX 走子进程隔离：onnxruntime 的原生分配在 Windows 上随变长 batch
+        # 碎片化增长（进程 RSS 可达 8GB+ 且 arena=False 也无法阻止），子进程每批
+        # 退出一次即彻底释放，主进程只保留向量本身。
+        return SubprocessEmbedder()
+    if backend == "zhipu" or (backend == "auto" and key):
+        return ZhipuEmbedder(api_key=key)
+    return SubprocessEmbedder()
+
+
+class SubprocessEmbedder:
+    """LocalEmbedder 的子进程隔离封装（每批一个子进程，退出即释放原生内存）。"""
+
+    BATCH = 1024
+
+    def __init__(self) -> None:
+        import subprocess
+        self._python = sys.executable
+        self._worker = str(Path(__file__).resolve().parent / "embed_worker.py")
+        self.name = "bge-small-en-v1.5-onnx"
+
+    def embed(self, texts: list[str]):
+        out: list = []
+        env = dict(os.environ)
+        env["FASTEMBED_CACHE_PATH"] = env.get(
+            "FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "fastembed"))
+        for start in range(0, len(texts), self.BATCH):
+            batch = texts[start:start + self.BATCH]
+            r = subprocess.run(
+                [self._python, self._worker],
+                input=json.dumps(batch), capture_output=True, text=True,
+                encoding="utf-8", timeout=600, env=env)
+            if r.returncode != 0:
+                raise RuntimeError(f"embed worker failed: {r.stderr[-400:]}")
+            payload = json.loads(r.stdout.strip().splitlines()[-1])
+            out.extend(payload["vecs"])
+        return out
+
+    def query_embed(self, questions: list[str]):
+        return self.embed(questions)
